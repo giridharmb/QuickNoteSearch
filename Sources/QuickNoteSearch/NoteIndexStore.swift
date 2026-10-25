@@ -89,19 +89,19 @@ final class NoteIndexStore: ObservableObject {
         let uuid = try reader.storeUUID()
         let newStamps = try reader.stamps()
         let tags = try reader.hashtags()
+        let altText = changed(newStamps).isEmpty ? [:] : try reader.inlineAltText()
 
         var dirty = !published
         for pk in stamps.keys where newStamps[pk] == nil { notes[pk] = nil; dirty = true }
-        let changed = newStamps.filter { stamps[$0.key] != $0.value }.map(\.key)
-        let raws = try reader.notes(changed)
+        let raws = try reader.notes(changed(newStamps))
 
         var decoded = [Note?](repeating: nil, count: raws.count)
         decoded.withUnsafeMutableBufferPointer { out in
             DispatchQueue.concurrentPerform(iterations: raws.count) { i in
                 let r = raws[i]
                 guard let stamp = newStamps[r.pk] else { return }
-                let text = r.locked ? "" : (r.data.flatMap(NoteDecoder.text) ?? "")
-                out[i] = Note(pk: r.pk, id: r.identifier, title: r.title, text: text, folder: stamp.folder,
+                let spans = r.locked ? [] : (r.data.flatMap { NoteDecoder.spans(from: $0, altText: altText) } ?? [])
+                out[i] = Note(pk: r.pk, id: r.identifier, title: r.title, spans: spans, folder: stamp.folder,
                               modified: Date(timeIntervalSinceReferenceDate: stamp.modified), locked: r.locked)
             }
         }
@@ -123,6 +123,10 @@ final class NoteIndexStore: ObservableObject {
             status.noteCount = built.notes.count
             status.tagCount = built.tagCounts.count
         }
+    }
+
+    private func changed(_ newStamps: [Int64: NotesReader.Stamp]) -> [Int64] {
+        newStamps.filter { stamps[$0.key] != $0.value }.map(\.key)
     }
 
     private func startWatching() {

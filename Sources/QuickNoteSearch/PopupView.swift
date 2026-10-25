@@ -19,7 +19,7 @@ struct PopupView: View {
                 .pickerStyle(.segmented).labelsHidden().padding(.horizontal, 12).padding(.vertical, 6)
             }
             HStack(spacing: 0) {
-                resultList.frame(width: showPreview ? 360 : nil)
+                resultList.frame(width: showPreview ? 420 : nil)
                 if showPreview {
                     Divider()
                     NotePreview(note: model.selectedNote, terms: model.parsed.terms, model: model, user: user)
@@ -28,7 +28,7 @@ struct PopupView: View {
             Divider()
             footer
         }
-        .frame(width: showPreview ? 900 : 560, height: 560)
+        .frame(width: showPreview ? 1100 : 680, height: 700)
         .background(.regularMaterial)
         .onAppear { searchFocused = true }
         .onReceive(NotificationCenter.default.publisher(for: .popupDidShow)) { _ in searchFocused = true }
@@ -235,8 +235,8 @@ struct NotePreview: View {
                 Divider()
                 ScrollView {
                     Text(note.locked ? AttributedString("🔒 This note is locked. Only its title is searchable.")
-                                     : highlighted(note.body, terms))
-                        .font(.system(size: 13))
+                                     : NoteFormatter.render(note.spans, highlight: terms, skipTitle: note.title))
+                        .font(.system(size: 14))
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .textSelection(.enabled)
                 }
@@ -246,24 +246,6 @@ struct NotePreview: View {
         } else {
             Text("No note selected").foregroundStyle(.tertiary).frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-    }
-
-    private func highlighted(_ text: String, _ terms: [String]) -> AttributedString {
-        let plain = String(text.prefix(30_000))
-        var out = AttributedString(plain)
-        let s = plain as NSString
-        var marks = 0
-        for term in terms where !term.isEmpty {
-            var r = NSRange(location: 0, length: s.length)
-            while marks < 300 {
-                let f = s.range(of: term, options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], range: r)
-                if f.location == NSNotFound { break }
-                if let range = Range(f, in: out) { out[range].backgroundColor = .yellow.opacity(0.45) }
-                marks += 1
-                r = NSRange(location: f.upperBound, length: s.length - f.upperBound)
-            }
-        }
-        return out
     }
 }
 

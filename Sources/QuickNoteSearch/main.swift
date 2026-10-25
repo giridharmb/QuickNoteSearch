@@ -81,7 +81,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // MARK: Popup
 
     private func setUpPanel() {
-        panel = PopupPanel(contentRect: NSRect(x: 0, y: 0, width: 900, height: 560),
+        panel = PopupPanel(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 700),
                            styleMask: [.titled, .fullSizeContentView, .nonactivatingPanel],
                            backing: .buffered, defer: true)
         panel.titleVisibility = .hidden

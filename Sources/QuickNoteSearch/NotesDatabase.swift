@@ -120,6 +120,16 @@ final class NotesReader {
         return out
     }
 
+    /// Visible text of inline attachments (hashtags, mentions), keyed by attachment identifier.
+    func inlineAltText() throws -> [String: String] {
+        guard ["ZIDENTIFIER", "ZALTTEXT"].allSatisfy(columns.contains) else { return [:] }
+        var out: [String: String] = [:]
+        try db.rows("SELECT ZIDENTIFIER, ZALTTEXT FROM ZICCLOUDSYNCINGOBJECT WHERE ZALTTEXT IS NOT NULL AND ZIDENTIFIER IS NOT NULL") {
+            if let id = $0.string(0), let alt = $0.string(1) { out[id] = alt }
+        }
+        return out
+    }
+
     /// Hashtags are inline attachments: their text lives in ZALTTEXT, not in the note body.
     func hashtags() throws -> [Int64: [String]] {
         guard ["ZTYPEUTI1", "ZALTTEXT", "ZNOTE1"].allSatisfy(columns.contains) else { return [:] }
@@ -134,14 +144,84 @@ final class NotesReader {
     }
 }
 
-/// Decodes ZICNOTEDATA.ZDATA: gzip → protobuf NoteStoreProto(2) → Document(3) → Note(2) = text.
+/// Formatting of one stretch of note text (subset of Notes' AttributeRun / ParagraphStyle).
+struct TextStyle: Equatable {
+    var paragraph = -1          // 0 title, 1 heading, 2 subheading, 4 monospaced, 100 •, 101 –, 102 1., 103 checklist
+    var indent = 0
+    var checked = false
+    var quote = false
+    var bold = false
+    var italic = false
+    var underline = false
+    var strike = false
+    var link: String?
+    var attachment = false      // placeholder for an image/table/etc.
+}
+
+struct Span: Equatable {
+    var text: String
+    var style = TextStyle()
+}
+
+/// Decodes ZICNOTEDATA.ZDATA: gzip → protobuf NoteStoreProto(2) → Document(3) → Note(2 text, 5 attribute runs).
 enum NoteDecoder {
     static func text(from data: Data) -> String? {
+        spans(from: data, altText: [:]).map { $0.map(\.text).joined() }
+    }
+
+    /// `altText` maps inline-attachment identifiers (hashtags, mentions) to their visible text.
+    static func spans(from data: Data, altText: [String: String]) -> [Span]? {
         let bytes = [UInt8](data)
         guard let raw = bytes.starts(with: [0x1f, 0x8b]) ? gunzip(bytes) : bytes,
-              let doc = field(2, in: raw), let note = field(3, in: doc), let text = field(2, in: note)
+              let note = Proto(raw)?.message(2)?.message(3), let textBytes = note.bytes[2]?.first
         else { return nil }
-        return String(decoding: text, as: UTF8.self)
+        let text = String(decoding: textBytes, as: UTF8.self) as NSString
+        var spans: [Span] = []
+        var pos = 0 // run lengths are UTF-16 units, like NSString
+        for run in (note.bytes[5] ?? []).compactMap(Proto.init) {
+            let len = min(run.varints[1] ?? 0, text.length - pos)
+            guard len > 0 else { continue }
+            var piece = text.substring(with: NSRange(location: pos, length: len))
+            pos += len
+            var style = TextStyle()
+            if let ps = run.message(2) {
+                style.paragraph = ps.varints[1] ?? -1
+                style.indent = ps.varints[4] ?? 0
+                style.checked = ps.message(5)?.varints[2] == 1
+                style.quote = (ps.varints[8] ?? 0) != 0
+            }
+            let weight = run.varints[5] ?? 0 // 1 bold, 2 italic, 3 both
+            style.bold = weight == 1 || weight == 3
+            style.italic = weight == 2 || weight == 3
+            style.underline = (run.varints[6] ?? 0) != 0
+            style.strike = (run.varints[7] ?? 0) != 0
+            style.link = run.string(9)
+            if let info = run.message(12), piece.contains("\u{FFFC}") {
+                let uti = info.string(2) ?? ""
+                if let alt = info.string(1).flatMap({ altText[$0] }) {
+                    piece = piece.replacingOccurrences(of: "\u{FFFC}", with: alt)
+                } else if !uti.contains("inlinetextattachment") {
+                    piece = piece.replacingOccurrences(of: "\u{FFFC}", with: placeholder(uti))
+                    style.attachment = true
+                }
+            }
+            spans.append(Span(text: piece, style: style))
+        }
+        if pos < text.length { spans.append(Span(text: text.substring(from: pos))) }
+        for i in spans.indices { spans[i].text = spans[i].text.replacingOccurrences(of: "\u{FFFC}", with: "") }
+        return spans
+    }
+
+    private static func placeholder(_ uti: String) -> String {
+        switch uti {
+        case let u where u.contains("table"): return "[▦ Table]"
+        case let u where u.contains("drawing") || u.contains("paper") || u.contains("sketch"): return "[✏️ Drawing]"
+        case let u where u.contains("pdf"): return "[📄 PDF]"
+        case let u where u.contains("url"): return "[🔗 Link]"
+        case let u where u.contains("image") || u.contains("jpeg") || u.contains("png") || u.contains("heic") || u.contains("gif"): return "[🖼 Image]"
+        case let u where u.contains("audio") || u.contains("movie") || u.contains("video"): return "[🎞 Media]"
+        default: return "[📎 Attachment]"
+        }
     }
 
     static func gunzip(_ b: [UInt8]) -> [UInt8]? {
@@ -157,9 +237,14 @@ enum NoteDecoder {
         guard let out = try? (Data(b[i..<(b.count - 8)]) as NSData).decompressed(using: .zlib) else { return nil }
         return [UInt8](out as Data)
     }
+}
 
-    /// First length-delimited value of field `number` in a protobuf message.
-    static func field(_ number: Int, in b: [UInt8]) -> [UInt8]? {
+/// Just enough protobuf: varints (last value wins) and length-delimited fields (all values).
+struct Proto {
+    var varints: [Int: Int] = [:]
+    var bytes: [Int: [[UInt8]]] = [:]
+
+    init?(_ b: [UInt8]) {
         var i = 0
         func varint() -> Int? {
             var v = 0, shift = 0
@@ -171,20 +256,23 @@ enum NoteDecoder {
             }
             return nil
         }
-        while i < b.count, let key = varint() {
+        while i < b.count {
+            guard let key = varint() else { return nil }
             switch key & 7 {
-            case 0: guard varint() != nil else { return nil }
+            case 0: guard let v = varint() else { return nil }; varints[key >> 3] = v
             case 1: i += 8
             case 5: i += 4
             case 2:
                 guard let len = varint(), len >= 0, i + len <= b.count else { return nil }
-                if key >> 3 == number { return Array(b[i..<(i + len)]) }
+                bytes[key >> 3, default: []].append(Array(b[i..<(i + len)]))
                 i += len
             default: return nil
             }
         }
-        return nil
     }
+
+    func message(_ n: Int) -> Proto? { bytes[n]?.first.flatMap(Proto.init) }
+    func string(_ n: Int) -> String? { bytes[n]?.first.map { String(decoding: $0, as: UTF8.self) } }
 }
 
 enum Tag {

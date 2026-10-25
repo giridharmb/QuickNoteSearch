@@ -5,6 +5,7 @@ struct Note: Identifiable, Hashable {
     let pk: Int64
     let title: String
     let body: String
+    let spans: [Span]        // body with Notes' formatting, for the preview
     let folder: String
     let modified: Date
     let locked: Bool
@@ -21,7 +22,13 @@ struct Note: Identifiable, Hashable {
     private static let tagRegex = try! NSRegularExpression(pattern: "(?<![\\p{L}\\p{N}&])#([\\p{L}\\p{N}_-]+)")
 
     init(pk: Int64, id: String, title: String?, text: String, folder: String, modified: Date, locked: Bool) {
-        let body = text.replacingOccurrences(of: "\u{FFFC}", with: "") // inline-attachment placeholders
+        self.init(pk: pk, id: id, title: title, spans: [Span(text: text.replacingOccurrences(of: "\u{FFFC}", with: ""))],
+                  folder: folder, modified: modified, locked: locked)
+    }
+
+    init(pk: Int64, id: String, title: String?, spans: [Span], folder: String, modified: Date, locked: Bool) {
+        let body = spans.map(\.text).joined()
+        self.spans = spans
         let firstLine = body.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? ""
         let title = (title?.isEmpty == false ? title! : firstLine).trimmingCharacters(in: .whitespaces)
         self.id = id

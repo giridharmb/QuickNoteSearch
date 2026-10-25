@@ -42,9 +42,40 @@ final class QuickNoteSearchTests: XCTestCase {
 
     func testDecodesGzippedProtobuf() throws {
         let text = "Grocery list\nmilk, eggs, café ☕️ \u{FFFC}"
-        XCTAssertEqual(NoteDecoder.text(from: try noteBlob(text)), text)
+        XCTAssertEqual(NoteDecoder.text(from: try noteBlob(text)), "Grocery list\nmilk, eggs, café ☕️ ") // placeholder dropped
         XCTAssertNil(NoteDecoder.text(from: Data([0x1f, 0x8b, 1, 2, 3])))
         XCTAssertNil(NoteDecoder.text(from: Data()))
+    }
+
+    private func vi(_ field: Int, _ v: Int) -> [UInt8] {
+        var out = [UInt8(field << 3)], n = v
+        repeat { var b = UInt8(n & 0x7f); n >>= 7; if n > 0 { b |= 0x80 }; out.append(b) } while n > 0
+        return out
+    }
+
+    func testDecodesFormattingRuns() throws {
+        // "Plan\nBuy \u{FFFC} milk\nDone\nStep\nPic \u{FFFC}" with title, bold, hashtag, checklist, numbered list, image.
+        let text = "Plan\nBuy \u{FFFC} milk\nDone\nStep\nPic \u{FFFC}"
+        func run(_ len: Int, para: Int? = nil, checked: Bool = false, weight: Int? = nil, attach: (String, String)? = nil) -> [UInt8] {
+            var r = vi(1, len)
+            if let para { r += ld(2, vi(1, para) + (checked ? ld(5, ld(1, [1]) + vi(2, 1)) : [])) }
+            if let weight { r += vi(5, weight) }
+            if let attach { r += ld(12, ld(1, Array(attach.0.utf8)) + ld(2, Array(attach.1.utf8))) }
+            return ld(5, r)
+        }
+        let runs = run(5, para: 0) + run(4, weight: 1) + run(1, attach: ("TAG1", "com.apple.notes.inlinetextattachment.hashtag"))
+            + run(6) + run(5, para: 103, checked: true) + run(5, para: 102) + run(4) + run(1, attach: ("IMG1", "public.jpeg"))
+        let proto = ld(2, ld(3, ld(2, Array(text.utf8)) + runs))
+        let spans = try XCTUnwrap(NoteDecoder.spans(from: try gzip(Data(proto)), altText: ["TAG1": "#groceries"]))
+        XCTAssertEqual(spans.map(\.text).joined(), "Plan\nBuy #groceries milk\nDone\nStep\nPic [🖼 Image]")
+        XCTAssertEqual(spans[0].style.paragraph, 0)
+        XCTAssertTrue(spans[1].style.bold)
+        XCTAssertTrue(spans[4].style.checked)
+        XCTAssertEqual(spans[5].style.paragraph, 102)
+        XCTAssertTrue(spans[7].style.attachment)
+
+        let rendered = String(NoteFormatter.render(spans, highlight: ["milk"], skipTitle: "Plan").characters)
+        XCTAssertEqual(rendered, "Buy #groceries milk\n◉  Done\n1.  Step\nPic [🖼 Image]")
     }
 
     // MARK: Query
